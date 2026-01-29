@@ -1,0 +1,4 @@
+2026-01-29 11:07:45.146 WARNING (SyncWorker_0) [homeassistant.loader] We found a custom integration gs_funds_tracker which has not been tested by Home Assistant. This component might cause stability problems, be sure to disable it if you experience issues with Home Assistant
+2026-01-29 11:07:45.147 WARNING (SyncWorker_0) [homeassistant.loader] We found a custom integration gs_funds_tracker which has not been tested by Home Assistant. This component might cause stability problems, be sure to disable it if you experience issues with Home Assistant
+2026-01-29 11:07:46.423 WARNING (Recorder) [homeassistant.components.recorder.util] The system could not validate that the sqlite3 database at //config/home-assistant_v2.db was shutdown cleanly
+2026-01-29 11:07:46.456 WARNING (Recorder) [homeassistant.components.recorder.util] Ended unfinished session (id=14 from 2026-01-29 09:05:18.625378)
