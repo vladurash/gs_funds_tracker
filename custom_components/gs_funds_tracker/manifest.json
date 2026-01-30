@@ -2,9 +2,9 @@
   "domain": "gs_funds_tracker",
   "name": "GS Funds Tracker",
   "version": "0.2.0",
-  "documentation": "https://github.com/local/gs-funds-tracker",
+  "documentation": "https://github.com/vladurash/gs-funds-tracker",
   "requirements": [],
-  "codeowners": ["@local"],
+  "codeowners": ["@vladurash"],
   "config_flow": true,
   "iot_class": "cloud_polling",
   "loggers": ["custom_components.gs_funds_tracker"]
