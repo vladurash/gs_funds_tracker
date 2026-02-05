@@ -40,10 +40,10 @@ ENTRY_SCHEMA = vol.Schema(
         vol.Required(CONF_PV_NUMBER): cv.string,
         vol.Required(CONF_SHARE_CLASS_ID): cv.string,
         vol.Optional(CONF_INVESTMENT_DATE): cv.string,
-        vol.Optional(CONF_VALUE_OF_INVESTMENT): vol.Coerce(float),
+        vol.Optional(CONF_VALUE_OF_INVESTMENT): vol.Any(vol.Coerce(float), None),
         vol.Required(CONF_PRICE_PER_UNIT): vol.Coerce(float),
-        vol.Optional(CONF_UNITS_ACQUIRED): vol.Coerce(float),
-        vol.Optional(CONF_CURRENCY): cv.string,
+        vol.Optional(CONF_UNITS_ACQUIRED): vol.Any(vol.Coerce(float), None),
+        vol.Optional(CONF_CURRENCY): vol.Any(cv.string, None),
     }
 )
 
@@ -67,6 +67,7 @@ async def async_setup_platform(
     resource_url: str = config[CONF_RESOURCE_URL]
     scan_interval = config.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL)
     entries: List[dict] = config.get(CONF_ENTRIES, [])
+    group_stats = calculate_group_stats(entries)
 
     session = aiohttp_client.async_get_clientsession(hass)
 
@@ -77,6 +78,7 @@ async def async_setup_platform(
             session,
             entry=entry,
             resource_url=resource_url,
+            group_info=group_stats.get(_group_key(entry)),
             update_interval=timedelta(seconds=scan_interval),
         )
         await coordinator.async_config_entry_first_refresh()
@@ -95,6 +97,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
     resource_url: str = options.get(CONF_RESOURCE_URL, data.get(CONF_RESOURCE_URL, DEFAULT_RESOURCE_URL))
     scan_interval = options.get(CONF_SCAN_INTERVAL, data.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL))
     entries: List[dict] = options.get(CONF_ENTRIES, data.get(CONF_ENTRIES, []))
+    group_stats = calculate_group_stats(entries)
 
     session = aiohttp_client.async_get_clientsession(hass)
 
@@ -105,6 +108,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
             session,
             entry=fund_entry,
             resource_url=resource_url,
+            group_info=group_stats.get(_group_key(fund_entry)),
             update_interval=timedelta(seconds=scan_interval),
         )
         await coordinator.async_config_entry_first_refresh()
@@ -116,13 +120,58 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
     async_add_entities(sensors, update_before_add=False)
 
 
+def _group_key(entry: dict) -> Optional[str]:
+    scid = entry.get(CONF_SHARE_CLASS_ID)
+    pv = entry.get(CONF_PV_NUMBER)
+    if not scid or not pv:
+        return None
+    return f"{pv}:{scid}"
+
+
+def calculate_group_stats(entries: List[dict]) -> Dict[str, Dict[str, float]]:
+    """Compute weighted average price and total units per (pvNumber, shareClassId)."""
+    groups: Dict[str, Dict[str, float]] = {}
+    for entry in entries:
+        key = _group_key(entry)
+        if not key:
+            continue
+        price = float(entry.get(CONF_PRICE_PER_UNIT, 0) or 0)
+        units = entry.get(CONF_UNITS_ACQUIRED)
+        if units is None:
+            total = entry.get(CONF_VALUE_OF_INVESTMENT)
+            units = (float(total) / price) if total and price else 0.0
+        units = float(units or 0)
+        group = groups.setdefault(key, {"weighted_sum": 0.0, "total_units": 0.0})
+        group["weighted_sum"] += price * units
+        group["total_units"] += units
+    for key, group in groups.items():
+        total_units = group["total_units"]
+        group["avg_price"] = round(group["weighted_sum"] / total_units, 4) if total_units else 0.0
+    return groups
+
+
+def _format_units(value: Optional[float]) -> Optional[str]:
+    if value is None:
+        return None
+    return f"{value:.3f}"
+
+
 class FundCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
     """Coordinator fetching fund data."""
 
-    def __init__(self, hass, session, entry: dict, resource_url: str, update_interval: timedelta) -> None:
+    def __init__(
+        self,
+        hass,
+        session,
+        entry: dict,
+        resource_url: str,
+        group_info: Optional[Dict[str, Any]],
+        update_interval: timedelta,
+    ) -> None:
         self._entry = entry
         self._resource_url = resource_url
         self._session = session
+        self._group_info = group_info or {}
         self.entry_slug = slugify(entry.get(CONF_NAME) or entry.get(CONF_SHARE_CLASS_ID, "fund"))
         name = f"GS Fund {self.entry_slug}"
 
@@ -172,8 +221,14 @@ class FundCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
             total = self._entry.get(CONF_VALUE_OF_INVESTMENT)
             units = (float(total) / acquisition_price) if total and acquisition_price else 0.0
 
-        profit = (nav - acquisition_price) * units if acquisition_price else 0.0
-        return_pct = ((nav / acquisition_price) - 1) * 100 if acquisition_price else 0.0
+        group_avg_price = self._group_info.get("avg_price")
+        group_units = self._group_info.get("total_units")
+        effective_price = group_avg_price if group_avg_price is not None else acquisition_price
+        effective_units = group_units if group_units is not None else units
+
+        # Profit per entry uses that entry's units; return_pct uses the averaged acquisition price.
+        profit = (nav - effective_price) * units if effective_price else 0.0
+        return_pct = ((nav / effective_price) - 1) * 100 if effective_price else 0.0
 
         fund_name = self._entry.get(CONF_NAME) or fund_detail.get("fundName") or "Fund"
         share_class = fund_detail.get("id") or self._entry.get(CONF_SHARE_CLASS_ID)
@@ -187,13 +242,18 @@ class FundCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
             "nav": nav,
             "up_down_value": nav_stat.get("upDownValue"),
             "up_down_pct": nav_stat.get("upDownPctValue"),
-            "acquisition_price": acquisition_price,
-            "units": units,
+            "acquisition_price": effective_price,
+            "entry_price": acquisition_price,
+            "entry_units": _format_units(units),
+            "group_avg_price": group_avg_price,
+            "group_total_units": _format_units(group_units),
+            "units": _format_units(effective_units),
             "profit": round(profit, 2),
             "return_pct": round(return_pct, 2),
             "investment_date": self._entry.get(CONF_INVESTMENT_DATE),
             "value_of_investment": self._entry.get(CONF_VALUE_OF_INVESTMENT),
             "sc_base_currency": fund_detail.get("scBaseCurrency") or self._entry.get(CONF_CURRENCY),
+            "units_aquired": units,
         }
 
 
@@ -232,6 +292,10 @@ class BaseFundSensor(CoordinatorEntity[FundCoordinator], SensorEntity):
             "sc_base_currency": data.get("sc_base_currency"),
             "up_down_value": data.get("up_down_value"),
             "up_down_pct": data.get("up_down_pct"),
+            "entry_price": data.get("entry_price"),
+            "entry_units": data.get("entry_units"),
+            "group_avg_price": data.get("group_avg_price"),
+            "group_total_units": data.get("group_total_units"),
         }
 
 

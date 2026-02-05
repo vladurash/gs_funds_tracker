@@ -1,42 +1,42 @@
-# GS Funds Tracker (HACS custom integration)
+## GS Funds Tracker (HACS/Config Flow)
 
-Home Assistant custom integration that polls the Goldman Sachs funds endpoint and exposes sensors for each investment entry:
+Home Assistant custom integration that polls the Goldman Sachs funds endpoint and exposes sensors per investment entry:
 - Net Asset Value (NAV)
 - Profit / benefit (absolute)
 - Return (percentage)
 
-Resource URL `https://am.gs.com/services/funds` .
+Defaults: `resource_url` https://am.gs.com/services/funds and 1-hour refresh.
 
-## Install (local or HACS custom repo)
-- For local dev: copy `custom_components/gs_funds_tracker` (this folder) into your Home Assistant `config/custom_components/` directory.
-- For HACS: add this repo as a custom repository (category “Integration”), then install **GS Funds Tracker**.
+### Install
+- HACS: add this repo as a custom repository (category “Integration”), install **GS Funds Tracker**.
+- Local: copy `custom_components/gs_funds_tracker` into your Home Assistant `config/custom_components/`.
+- Restart Home Assistant.
 
-Restart Home Assistant after installation.
+### Configure (UI only)
+1) Settings → Devices & Services → Add Integration → **GS Funds Tracker** (or Configure if already added).
+2) Step 1: set `resource_url` (optional) and `scan_interval` (seconds, ≥60).
+3) Step 2: add entries (you can add multiple, edit, or delete later):
+   - `name` (friendly label)
+   - `pvNumber`
+   - `shareClassId`
+   - `investment_date` (optional)
+   - `value_of_investment` (optional; used to infer units if `units_acquired` missing)
+   - `price_per_unit` (required)
+   - `units_acquired` (optional)
+   - `currency` (optional)
+4) Finish. To adjust later, open Configure → entries menu to add/edit/delete.
 
-## Configure (UI only)
-- Go to *Settings → Devices & Services → Add Integration* and search **GS Funds Tracker** (or start from the HACS card).
-- Step 1: Set `resource_url` (optional) and `scan_interval` in seconds (optional, min 60).
-- Step 2: Add entries (multiple). Fields per entry:
-  - `name` (friendly label used in sensors)
-  - `pvNumber`
-  - `shareClassId`
-  - `investment_date` (optional)
-  - `value_of_investment` (optional; used to infer units if `units_acquired` missing)
-  - `price_per_unit` (required)
-  - `units_acquired` (optional)
-  - `currency` (optional)
-- After adding at least one entry, choose Finish. The integration stores settings in Options.
-- To edit later: Settings → Devices & Services → GS Funds Tracker → Configure. You can add, edit, or delete entries; forms are prefilled when editing.
-
-## Sensors created per entry
+### Sensors per entry
 - `sensor.<entry_slug>_nav`: `{fundName} - {shareClassId}` with attributes `as_at_date`, `currency`, `up_down_value`, `up_down_pct`, etc.
-- `sensor.<entry_slug>_profit`: `{fundName} Profit Net`, computed from `(current_nav - price_per_unit) * units`.
-- `sensor.<entry_slug>_return_pct`: `{fundName} Randament`, computed from `(current_nav / price_per_unit - 1) * 100`.
+- `sensor.<entry_slug>_profit`: `{fundName} Profit Net`, computed from `(current_nav - acquisition_price) * total_units`.
+- `sensor.<entry_slug>_return_pct`: `{fundName} Randament`, computed from `(current_nav / acquisition_price - 1) * 100`.
 
-`entry_slug` is the lowercased name/shareClassId slug (non-alphanumerics replaced with `_`).
+`entry_slug` is the slugified `name`/`shareClassId`.
 
-## How it works
-- Uses Home Assistant’s `aiohttp` client to POST the GS GraphQL payload and parse NAV (`netAssetValue`) from `quickStats`.
-- Derives units if `units_acquired` is missing but both `price_per_unit` and `value_of_investment` are provided.
+### How it works
+- Uses HA `aiohttp` client to POST the GS GraphQL query and reads `netAssetValue` from `quickStats`.
+- Derives units when missing and `value_of_investment` + `price_per_unit` are given.
+- If multiple entries share the same `shareClassId`/`pvNumber`, it computes a weighted average acquisition price:  
+  `(P1*U1 + P2*U2 + ... + Pn*Un) / (U1 + U2 + ... + Un)` and uses the group total units. Profit/return use this averaged price and total units so positions for the same share class are aggregated.
 - Updates every `scan_interval` seconds (default 3600).
-- Sensor display names honor the user-provided `name`; underlying unique IDs use the slugified `name`/`shareClassId` combination.
+- Sensor display names honor the user-provided `name`; unique IDs use the slugified `name`/`shareClassId`.

@@ -8,6 +8,7 @@ import voluptuous as vol
 
 from homeassistant import config_entries
 from homeassistant.const import CONF_NAME, CONF_SCAN_INTERVAL
+from homeassistant.helpers import aiohttp_client
 
 from .const import (
     DEFAULT_RESOURCE_URL,
@@ -19,7 +20,6 @@ from .sensor import (
     CONF_ENTRIES,
     CONF_INVESTMENT_DATE,
     CONF_PRICE_PER_UNIT,
-    CONF_PV_NUMBER,
     CONF_RESOURCE_URL,
     CONF_SHARE_CLASS_ID,
     CONF_UNITS_ACQUIRED,
@@ -60,14 +60,21 @@ class GSFundsConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         """Collect one fund entry."""
         errors = {}
         if user_input is not None:
-            entry_errors = _validate_entry(user_input)
+            pv = await _fetch_pvnumber(self.hass, user_input.get(CONF_SHARE_CLASS_ID))
+            if not pv:
+                errors["shareClassId"] = "pv_not_found"
+                entry_errors = _validate_entry(user_input)
+                
+            else:
+                user_input["pvNumber"] = pv
+                entry_errors = {}
             if entry_errors:
                 errors = entry_errors
             else:
-                self._entries.append(user_input)
+                self._entries.append(_normalize_optional_numbers(user_input))
                 return await self.async_step_more()
 
-        data_schema = vol.Schema(ENTRY_SCHEMA.schema)
+        data_schema = _entry_schema_with_defaults()
         return self.async_show_form(step_id="entry", data_schema=data_schema, errors=errors)
 
     async def async_step_more(self, user_input=None):
@@ -189,11 +196,19 @@ class GSFundsOptionsFlowHandler(config_entries.OptionsFlow):
         defaults = self._entries[edit_index] if edit_index is not None else None
 
         if user_input is not None:
-            entry_errors = _validate_entry(user_input)
+            # Auto-resolve pvNumber based on shareClassId
+            pv = await _fetch_pvnumber(self.hass, user_input.get(CONF_SHARE_CLASS_ID))
+            if not pv:
+                errors["shareClassId"] = "pv_not_found"
+                entry_errors = {}
+            else:
+                user_input["pvNumber"] = pv
+                normalized_for_validate = _normalize_optional_numbers(user_input, defaults, use_defaults=False)
+                entry_errors = _validate_entry(normalized_for_validate)
             if entry_errors:
                 errors = entry_errors
             else:
-                normalized = _normalize_optional_numbers(user_input)
+                normalized = _normalize_optional_numbers(user_input, defaults, use_defaults=True)
                 if edit_index is None:
                     self._entries.append(normalized)
                 else:
@@ -216,31 +231,98 @@ def _validate_entry(entry: Dict[str, Any]) -> Dict[str, str]:
     return errors
 
 
-def _normalize_optional_numbers(entry: Dict[str, Any]) -> Dict[str, Any]:
+def _normalize_optional_numbers(
+    entry: Dict[str, Any], defaults: Dict[str, Any] | None = None, use_defaults: bool = True
+) -> Dict[str, Any]:
+    defaults = defaults or {}
     normalized = dict(entry)
+    # numeric optionals
     for key in (CONF_VALUE_OF_INVESTMENT, CONF_UNITS_ACQUIRED):
-        if key not in normalized or normalized[key] == "" or normalized[key] is vol.UNDEFINED:
-            normalized[key] = None
-    if normalized.get(CONF_INVESTMENT_DATE) == "":
-        normalized[CONF_INVESTMENT_DATE] = None
-    if normalized.get(CONF_CURRENCY) == "":
-        normalized[CONF_CURRENCY] = None
+        raw = normalized.get(key, "")
+        if raw in ("", vol.UNDEFINED, None):
+            normalized[key] = defaults.get(key) if use_defaults else None
+        else:
+            try:
+                normalized[key] = float(raw)
+            except (TypeError, ValueError):
+                normalized[key] = defaults.get(key) if use_defaults else None
+    # optional date
+    if normalized.get(CONF_INVESTMENT_DATE) in ("", vol.UNDEFINED, None):
+        normalized[CONF_INVESTMENT_DATE] = defaults.get(CONF_INVESTMENT_DATE) if use_defaults else None
+    # optional currency
+    if normalized.get(CONF_CURRENCY) in ("", vol.UNDEFINED, None):
+        normalized[CONF_CURRENCY] = defaults.get(CONF_CURRENCY) if use_defaults else None
     return normalized
+
+
+async def _fetch_pvnumber(hass, share_class_id: str | None) -> str | None:
+    """Look up pvNumber by shareClassId using GS search endpoint."""
+    if not share_class_id:
+        return None
+    session = aiohttp_client.async_get_clientsession(hass)
+    url = (
+        "https://am.gs.com/services/search-engine/ro-ro/individual/search"
+        f"?q={share_class_id}&selection=&hitsPerPage=10&"
+    )
+    try:
+        async with session.get(url, timeout=20) as resp:
+            if resp.status != 200:
+                return None
+            data = await resp.json()
+    except Exception:
+        return None
+
+    hits = (data.get("funds") or {}).get("hits") or []
+    for hit in hits:
+        pv = hit.get("pvNumber")
+        if pv:
+            return pv
+    return None
 
 
 def _entry_schema_with_defaults(defaults: Dict[str, Any] | None = None) -> vol.Schema:
     defaults = defaults or {}
+    derived_units = _format_maybe_units(defaults)
+    derived_value = _format_maybe_value(defaults)
     return vol.Schema(
         {
             vol.Required(CONF_NAME, default=defaults.get(CONF_NAME, "")): str,
-            vol.Required(CONF_PV_NUMBER, default=defaults.get(CONF_PV_NUMBER, "")): str,
             vol.Required(CONF_SHARE_CLASS_ID, default=defaults.get(CONF_SHARE_CLASS_ID, "")): str,
             vol.Optional(CONF_INVESTMENT_DATE, default=defaults.get(CONF_INVESTMENT_DATE, "")): str,
-            vol.Optional(CONF_VALUE_OF_INVESTMENT, default=defaults.get(CONF_VALUE_OF_INVESTMENT, vol.UNDEFINED)): vol.Coerce(
-                float
-            ),
+            vol.Optional(CONF_VALUE_OF_INVESTMENT, default=derived_value): str,
             vol.Required(CONF_PRICE_PER_UNIT, default=defaults.get(CONF_PRICE_PER_UNIT, 0.0)): vol.Coerce(float),
-            vol.Optional(CONF_UNITS_ACQUIRED, default=defaults.get(CONF_UNITS_ACQUIRED, vol.UNDEFINED)): vol.Coerce(float),
-            vol.Optional(CONF_CURRENCY, default=defaults.get(CONF_CURRENCY, "")): str,
+            vol.Optional(CONF_UNITS_ACQUIRED, default=derived_units): str,
+            vol.Optional(CONF_CURRENCY, default=str(defaults.get(CONF_CURRENCY, ""))): str,
         }
     )
+
+
+def _format_maybe_units(entry: Dict[str, Any]) -> str:
+    units = entry.get(CONF_UNITS_ACQUIRED)
+    if units is None:
+        # derive if possible
+        price = entry.get(CONF_PRICE_PER_UNIT)
+        value = entry.get(CONF_VALUE_OF_INVESTMENT)
+        try:
+            if value is not None and price:
+                units = float(value) / float(price)
+        except Exception:
+            units = None
+    else:
+        price = entry.get(CONF_PRICE_PER_UNIT)
+        value = entry.get(CONF_VALUE_OF_INVESTMENT)
+        units = float(value) / float(price) if value is not None and price else units
+    return "" if units in (None, vol.UNDEFINED, "") else f"{float(units):.3f}"
+
+
+def _format_maybe_value(entry: Dict[str, Any]) -> str:
+    value = entry.get(CONF_VALUE_OF_INVESTMENT)
+    if value is None:
+        units = entry.get(CONF_UNITS_ACQUIRED)
+        price = entry.get(CONF_PRICE_PER_UNIT)
+        try:
+            if units is not None and price:
+                value = float(units) * float(price)
+        except Exception:
+            value = None
+    return "" if value in (None, vol.UNDEFINED, "") else f"{float(value):.2f}"
