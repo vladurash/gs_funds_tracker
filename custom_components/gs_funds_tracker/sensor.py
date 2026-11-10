@@ -89,19 +89,34 @@ async def async_setup_platform(
 
     async_add_entities(sensors, update_before_add=False)
 
+async def async_setup_entry_coordinators(
+    hass: HomeAssistant, entry: ConfigEntry
+) -> List[FundCoordinator]:
+    """Create coordinators and perform their first refresh before platform setup."""
 
-async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback):
-    """Set up GS Funds Tracker sensors from config entry (UI)."""
     data = entry.data
     options = entry.options or {}
-    resource_url: str = options.get(CONF_RESOURCE_URL, data.get(CONF_RESOURCE_URL, DEFAULT_RESOURCE_URL))
-    scan_interval = options.get(CONF_SCAN_INTERVAL, data.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL))
-    entries: List[dict] = options.get(CONF_ENTRIES, data.get(CONF_ENTRIES, []))
-    group_stats = calculate_group_stats(entries)
 
+    resource_url: str = options.get(
+        CONF_RESOURCE_URL,
+        data.get(CONF_RESOURCE_URL, DEFAULT_RESOURCE_URL),
+    )
+
+    scan_interval = options.get(
+        CONF_SCAN_INTERVAL,
+        data.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL),
+    )
+
+    entries: List[dict] = options.get(
+        CONF_ENTRIES,
+        data.get(CONF_ENTRIES, []),
+    )
+
+    group_stats = calculate_group_stats(entries)
     session = aiohttp_client.async_get_clientsession(hass)
 
-    sensors: List[SensorEntity] = []
+    coordinators: List[FundCoordinator] = []
+
     for fund_entry in entries:
         coordinator = FundCoordinator(
             hass,
@@ -111,14 +126,61 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
             group_info=group_stats.get(_group_key(fund_entry)),
             update_interval=timedelta(seconds=scan_interval),
         )
+
+        # This can raise ConfigEntryNotReady.
+        # It must happen before async_forward_entry_setups().
         await coordinator.async_config_entry_first_refresh()
 
+        coordinators.append(coordinator)
+
+    return coordinators
+
+
+# async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback):
+#     """Set up GS Funds Tracker sensors from config entry (UI)."""
+#     data = entry.data
+#     options = entry.options or {}
+#     resource_url: str = options.get(CONF_RESOURCE_URL, data.get(CONF_RESOURCE_URL, DEFAULT_RESOURCE_URL))
+#     scan_interval = options.get(CONF_SCAN_INTERVAL, data.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL))
+#     entries: List[dict] = options.get(CONF_ENTRIES, data.get(CONF_ENTRIES, []))
+#     group_stats = calculate_group_stats(entries)
+
+#     session = aiohttp_client.async_get_clientsession(hass)
+
+#     sensors: List[SensorEntity] = []
+#     for fund_entry in entries:
+#         coordinator = FundCoordinator(
+#             hass,
+#             session,
+#             entry=fund_entry,
+#             resource_url=resource_url,
+#             group_info=group_stats.get(_group_key(fund_entry)),
+#             update_interval=timedelta(seconds=scan_interval),
+#         )
+#         await coordinator.async_config_entry_first_refresh()
+
+#         sensors.append(NavSensor(coordinator))
+#         sensors.append(ProfitSensor(coordinator))
+#         sensors.append(ReturnSensor(coordinator))
+
+#     async_add_entities(sensors, update_before_add=False)
+async def async_setup_entry(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    async_add_entities: AddEntitiesCallback,
+):
+    """Set up GS Funds Tracker sensors from config entry (UI)."""
+
+    coordinators = hass.data[DOMAIN][entry.entry_id]["coordinators"]
+
+    sensors: List[SensorEntity] = []
+
+    for coordinator in coordinators:
         sensors.append(NavSensor(coordinator))
         sensors.append(ProfitSensor(coordinator))
         sensors.append(ReturnSensor(coordinator))
 
     async_add_entities(sensors, update_before_add=False)
-
 
 def _group_key(entry: dict) -> Optional[str]:
     scid = entry.get(CONF_SHARE_CLASS_ID)
